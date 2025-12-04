@@ -26,7 +26,8 @@ jobs:
           libelf-dev \
           libbpf-dev \
           linux-headers-generic \
-          bpftool
+          gettext \
+          autopoint
     - name: Verify installations
       run: |
         clang --version
