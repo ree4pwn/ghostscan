@@ -3,6 +3,8 @@ name: Rust
 on:
   push:
     branches: [ "master" ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ "master" ]
 
@@ -11,11 +13,46 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.tag-check.outputs.release }}
+      tag: ${{ steps.tag-check.outputs.tag }}
 
     steps:
     - uses: actions/checkout@v4
+    - name: Check for release tag
+      id: tag-check
+      run: |
+        REF="${{ github.ref }}"
+        if echo "$REF" | grep -q "^refs/tags/v"; then
+          TAG=${REF#refs/tags/}
+          echo "release=true" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Detected release tag: $TAG"
+        else
+          echo "release=false" >> $GITHUB_OUTPUT
+          echo "tag=" >> $GITHUB_OUTPUT
+          echo "Not a release tag: $REF"
+        fi
+    
+    - name: Set up Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+    
+    - name: Cache Rust dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+    
     - name: Install BPF build dependencies
       run: |
         sudo apt-get update
@@ -28,12 +65,101 @@ jobs:
           linux-headers-generic \
           gettext \
           autopoint
+    
     - name: Verify installations
       run: |
         clang --version
         llc --version
         ls -la /usr/include/bpf/bpf_helpers.h || echo "Warning: bpf_helpers.h not found"
+    
     - name: Build
       run: cargo build --release --verbose
+    
     - name: Run tests
       run: cargo test --verbose
+    
+    - name: Prepare release artifacts
+      if: steps.tag-check.outputs.release == 'true'
+      run: |
+        mkdir -p release-artifacts
+        # 复制可执行文件（根据实际项目结构调整路径）
+        if [ -d "target/release" ]; then
+          find target/release -maxdepth 1 -type f -executable ! -name "*.d" ! -name "*.rlib" -exec cp {} release-artifacts/ \;
+        fi
+        # 如果找到文件，创建压缩包
+        if [ "$(ls -A release-artifacts)" ]; then
+          cd release-artifacts
+          tar -czf ../release-artifacts.tar.gz *
+          cd ..
+          echo "Release artifacts prepared:"
+          ls -lh release-artifacts/
+        else
+          echo "Warning: No release artifacts found"
+          touch release-artifacts/README.txt
+          echo "No binaries found in target/release" > release-artifacts/README.txt
+          cd release-artifacts
+          tar -czf ../release-artifacts.tar.gz *
+          cd ..
+        fi
+    
+    - name: Upload release artifacts
+      if: steps.tag-check.outputs.release == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-binaries
+        path: |
+          release-artifacts.tar.gz
+          release-artifacts/
+        retention-days: 30
+
+  release:
+    needs: build
+    if: needs.build.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download release artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: release-binaries
+        path: release-artifacts/
+    
+    - name: Get release tag
+      id: tag
+      run: |
+        TAG=${{ github.ref_name }}
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+        VERSION=${TAG#v}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Release tag: $TAG"
+        echo "Release version: $VERSION"
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.tag.outputs.tag }}
+        name: Release ${{ steps.tag.outputs.tag }}
+        body: |
+          ## Release ${{ steps.tag.outputs.tag }}
+          
+          ### Changes
+          - Automated release from CI/CD
+          
+          ### Downloads
+          - Extract the tarball and run the binaries
+          
+          ### Installation
+          ```bash
+          tar -xzf release-artifacts.tar.gz
+          ```
+        files: |
+          release-artifacts/release-artifacts.tar.gz
+          release-artifacts/*
+        draft: false
+        prerelease: ${{ contains(steps.tag.outputs.tag, '-') || contains(steps.tag.outputs.tag, 'alpha') || contains(steps.tag.outputs.tag, 'beta') || contains(steps.tag.outputs.tag, 'rc') }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
