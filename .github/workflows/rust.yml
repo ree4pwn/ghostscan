@@ -16,6 +16,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gettext autopoint libelf-dev zlib1g-dev
     - name: Build
       run: cargo build --release --verbose
     - name: Run tests
